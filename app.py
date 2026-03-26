@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import calendar
 
 # 1. Page Configuration
-st.set_page_config(page_title="Host Revenue Optimizer", page_icon="🚗", layout="wide")
-st.title("🚗 Professional Fleet Revenue Optimizer")
-st.markdown("### VIN-Level Analytics with Automatic Date Detection")
+st.set_page_config(page_title="Monthly Fleet Optimizer", page_icon="🚗", layout="wide")
+st.title("📅 Month-over-Month Revenue Optimizer")
+st.markdown("### Individual monthly performance breakdown per VIN.")
 
-# Helper function to clean currency strings
 def clean_currency(column):
     if column.dtype == 'object':
         return pd.to_numeric(column.replace(r'[\$,\s]', '', regex=True), errors='coerce').fillna(0)
@@ -15,107 +15,95 @@ def clean_currency(column):
 
 # 2. Sidebar / Upload
 with st.sidebar:
-    st.header("1. Upload Trip Export")
-    uploaded_file = st.file_uploader("Drop your Turo/Host CSV here", type="csv")
+    st.header("1. Data Source")
+    uploaded_file = st.file_uploader("Upload Trip Export CSV", type="csv")
     
     st.divider()
-    st.header("2. Market Benchmark")
+    st.header("2. Benchmarks")
     market_avg = st.number_input("Target Daily Rate ($)", value=75, min_value=1)
-    st.info("The app will automatically detect the date range from your file.")
+    target_util = st.slider("Target Utilization %", 50, 90, 75) / 100
 
 if uploaded_file is not None:
     try:
-        # 3. Data Loading & Initial Cleaning
+        # 3. Data Loading & Cleaning
         df_raw = pd.read_csv(uploaded_file)
         df_raw.columns = df_raw.columns.str.strip().str.lower().str.replace(' ', '_')
 
-        # Filter for only "Completed" or "Started" trips (ignores Canceled)
+        # Filter for valid trips
         if 'trip_status' in df_raw.columns:
             valid_statuses = ['completed', 'started', 'checked out', 'checked in']
             df_raw = df_raw[df_raw['trip_status'].str.lower().isin(valid_statuses)]
 
-        # 4. Automatic Date Detection
+        # 4. Date Parsing & Month Extraction
         df_raw['trip_start'] = pd.to_datetime(df_raw['trip_start'], errors='coerce')
-        df_raw['trip_end'] = pd.to_datetime(df_raw['trip_end'], errors='coerce')
+        df_raw = df_raw.dropna(subset=['trip_start'])
         
-        start_date = df_raw['trip_start'].min()
-        end_date = df_raw['trip_end'].max()
+        # Create Month/Year identifiers
+        df_raw['month_year'] = df_raw['trip_start'].dt.to_period('M')
         
-        # Calculate span of the report
-        if pd.notnull(start_date) and pd.notnull(end_date):
-            days_in_period = (end_date - start_date).days
-            if days_in_period <= 0: days_in_period = 1 
-        else:
-            days_in_period = 30 # Fallback
+        # 5. Month Selector
+        available_months = sorted(df_raw['month_year'].unique(), reverse=True)
+        selected_month = st.selectbox("Select Month for Analysis", available_months)
+        
+        # Filter data for the specific month
+        df_month = df_raw[df_raw['month_year'] == selected_month].copy()
+        
+        # Calculate days in the selected month
+        num_days = calendar.monthrange(selected_month.year, selected_month.month)[1]
+        st.info(f"Analyzing {selected_month} ({num_days} total days)")
 
-        st.sidebar.success(f"📅 Report Span: {days_in_period} Days")
-        st.sidebar.caption(f"{start_date.date()} to {end_date.date()}")
+        # 6. Transform into VIN Summary for that month
+        df_month['trip_days'] = pd.to_numeric(df_month['trip_days'], errors='coerce').fillna(0)
+        df_month['total_earnings'] = clean_currency(df_month['total_earnings'])
 
-        # 5. Math Readiness
-        df_raw['trip_days'] = pd.to_numeric(df_raw['trip_days'], errors='coerce').fillna(0)
-        df_raw['total_earnings'] = clean_currency(df_raw['total_earnings'])
-
-        # 6. Transform into VIN Summary
-        summary = df_raw.groupby('vin').agg({
+        summary = df_month.groupby('vin').agg({
             'vehicle_name': 'first',
             'trip_days': 'sum',
             'total_earnings': 'sum'
         }).reset_index()
 
-        # Final Calculations
         summary['display_name'] = summary['vehicle_name'] + " (" + summary['vin'].str[-5:] + ")"
-        summary['utilization'] = (summary['trip_days'] / days_in_period).clip(upper=1.0)
+        summary['utilization'] = (summary['trip_days'] / num_days).clip(upper=1.0)
         summary['daily_rate'] = summary['total_earnings'] / summary['trip_days']
         
-        # Revenue Forecasting
-        TARGET_UTIL = 0.75
-        summary['potential_rev'] = (days_in_period * TARGET_UTIL) * market_avg
-        
-        total_current = summary['total_earnings'].sum()
-        total_potential = summary['potential_rev'].sum()
-        revenue_gap = total_potential - total_current
+        # Potential vs Actual
+        potential_rev = (num_days * target_util) * market_avg
+        total_actual = summary['total_earnings'].sum()
+        total_potential = potential_rev * len(summary) # Per vehicle
+        revenue_gap = total_potential - total_actual
 
-        # 7. Layout - Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Actual Earnings", f"${total_current:,.2f}")
-        m2.metric(f"Target ({TARGET_UTIL:.0%})", f"${total_potential:,.2f}")
-        m3.metric("Revenue Gap", f"${revenue_gap:,.2f}", delta=f"{-revenue_gap:,.2f}", delta_color="inverse")
+        # 7. Dashboard Layout
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Month Earnings", f"${total_actual:,.2f}")
+        col2.metric("Target Revenue", f"${total_potential:,.2f}")
+        col3.metric("Revenue Gap", f"${revenue_gap:,.2f}", delta=f"{-revenue_gap:,.2f}", delta_color="inverse")
 
         st.divider()
 
-        # 8. Visuals
-        col_chart, col_list = st.columns([2, 1])
+        # 8. Charts
+        fig = px.bar(
+            summary.sort_values('utilization'), 
+            x="utilization", 
+            y="display_name", 
+            orientation='h',
+            title=f"Utilization by VIN: {selected_month}",
+            color="utilization",
+            color_continuous_scale="RdYlGn",
+            labels={"utilization": "Utilization %", "display_name": "Vehicle"},
+            range_x=[0, 1]
+        )
+        fig.add_vline(x=target_util, line_dash="dot", annotation_text=f"Target {target_util:.0%}")
+        st.plotly_chart(fig, use_container_width=True)
 
-        with col_chart:
-            fig = px.scatter(
-                summary, x="daily_rate", y="utilization", 
-                size="trip_days", color="display_name",
-                hover_name="vin",
-                labels={"daily_rate": "Daily Rate ($)", "utilization": "Utilization (%)"},
-                title=f"Fleet Performance ({days_in_period} Day Span)",
-                template="plotly_white",
-                range_y=[0, 1.1] # Caps the view at 110% for clarity
-            )
-            fig.add_hline(y=0.75, line_dash="dot", annotation_text="75% Target")
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col_list:
-            st.subheader("📋 VIN Action Plan")
-            for _, row in summary.sort_values('utilization', ascending=False).iterrows():
-                with st.expander(f"{row['display_name']}"):
-                    st.write(f"**Util:** {row['utilization']:.1%}")
-                    st.write(f"**Earned:** ${row['total_earnings']:,.2f}")
-                    
-                    if row['utilization'] > 0.85:
-                        st.error("Action: Raise Daily Price")
-                    elif row['utilization'] < 0.50:
-                        st.warning("Action: Lower Daily Price")
-                    else:
-                        st.success("Action: Strategy Dialed In")
+        # 9. Detailed Action Table
+        st.subheader("📋 Monthly Action Items")
+        st.dataframe(
+            summary[['display_name', 'trip_days', 'utilization', 'daily_rate', 'total_earnings']]
+            .style.format({'utilization': '{:.1%}', 'daily_rate': '${:.2f}', 'total_earnings': '${:.2f}'}),
+            use_container_width=True
+        )
 
     except Exception as e:
-        st.error(f"Critical Error: {e}")
-        st.info("Check if your CSV columns match the Turo/Standard format.")
-
+        st.error(f"Error processing monthly data: {e}")
 else:
-    st.info("Please upload your trip export CSV to begin. The app will automatically handle date ranges and canceled trips.")
+    st.info("Upload your CSV. You will then be able to toggle between months in the dropdown menu.")
