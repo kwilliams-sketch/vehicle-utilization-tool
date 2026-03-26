@@ -16,8 +16,26 @@ with st.sidebar:
 if uploaded_file is not None:
     # 3. Data Processing
     df = pd.read_csv(uploaded_file)
-    df['utilization'] = df['days_booked'] / df['days_available']
-    df['current_monthly_rev'] = df['days_booked'] * df['daily_rate']
+    
+    # --- NEW: The Sanitizer ---
+    # This strips whitespace and makes everything lowercase to prevent KeyErrors
+    df.columns = df.columns.str.strip().str.lower()
+    # ---------------------------
+
+    # Now we use lowercase names to match the sanitizer
+    try:
+        df['utilization'] = df['days_booked'] / df['days_available']
+        df['current_monthly_rev'] = df['days_booked'] * df['daily_rate']
+        
+        # ... rest of your logic (ensure all column names here are lowercase) ...
+        TARGET_UTIL = 0.75
+        df['potential_monthly_rev'] = (df['days_available'] * TARGET_UTIL) * df['market_rate']
+        
+        # [The rest of your existing metric and chart code goes here]
+
+    except KeyError as e:
+        st.error(f"🚨 **Column Missing:** The app couldn't find the column: `{e}`")
+        st.info("Please ensure your CSV has these exact headers: `vehicle_alias`, `days_available`, `days_booked`, `daily_rate`, `market_rate`")
     
     # 4. Revenue Forecasting Logic
     TARGET_UTIL = 0.75
