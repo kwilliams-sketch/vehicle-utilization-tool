@@ -4,70 +4,82 @@ import plotly.express as px
 
 # 1. Page Configuration
 st.set_page_config(page_title="Host Revenue Optimizer", page_icon="🚗", layout="wide")
-st.title("🚗 VIN-Level Fleet Optimizer")
-st.markdown("### Individualized tracking for every vehicle in your fleet.")
+st.title("🚗 Professional Fleet Revenue Optimizer")
+st.markdown("### VIN-Level Analytics with Automatic Date Detection")
 
-# 2. Sidebar Settings
-with st.sidebar:
-    st.header("1. Upload Trip Export")
-    uploaded_file = st.file_uploader("Drop your CSV here", type="csv")
-    
-    st.divider()
-    st.header("2. Global Assumptions")
-    days_in_period = st.number_input("Days in this Period (e.g. 30)", value=30, min_value=1)
-    market_avg = st.number_input("Est. Market Daily Rate ($)", value=75, min_value=1)
-
-# Helper function to turn "$1,200.00" into 1200.00
+# Helper function to clean currency strings
 def clean_currency(column):
     if column.dtype == 'object':
-        # Removes $, commas, and whitespace
         return pd.to_numeric(column.replace(r'[\$,\s]', '', regex=True), errors='coerce').fillna(0)
     return column
 
+# 2. Sidebar / Upload
+with st.sidebar:
+    st.header("1. Upload Trip Export")
+    uploaded_file = st.file_uploader("Drop your Turo/Host CSV here", type="csv")
+    
+    st.divider()
+    st.header("2. Market Benchmark")
+    market_avg = st.number_input("Target Daily Rate ($)", value=75, min_value=1)
+    st.info("The app will automatically detect the date range from your file.")
+
 if uploaded_file is not None:
     try:
-        # 3. Data Loading
+        # 3. Data Loading & Initial Cleaning
         df_raw = pd.read_csv(uploaded_file)
         df_raw.columns = df_raw.columns.str.strip().str.lower().str.replace(' ', '_')
 
-        # 4. DATA CLEANING
+        # Filter for only "Completed" or "Started" trips (ignores Canceled)
+        if 'trip_status' in df_raw.columns:
+            valid_statuses = ['completed', 'started', 'checked out', 'checked in']
+            df_raw = df_raw[df_raw['trip_status'].str.lower().isin(valid_statuses)]
+
+        # 4. Automatic Date Detection
+        df_raw['trip_start'] = pd.to_datetime(df_raw['trip_start'], errors='coerce')
+        df_raw['trip_end'] = pd.to_datetime(df_raw['trip_end'], errors='coerce')
+        
+        start_date = df_raw['trip_start'].min()
+        end_date = df_raw['trip_end'].max()
+        
+        # Calculate span of the report
+        if pd.notnull(start_date) and pd.notnull(end_date):
+            days_in_period = (end_date - start_date).days
+            if days_in_period <= 0: days_in_period = 1 
+        else:
+            days_in_period = 30 # Fallback
+
+        st.sidebar.success(f"📅 Report Span: {days_in_period} Days")
+        st.sidebar.caption(f"{start_date.date()} to {end_date.date()}")
+
+        # 5. Math Readiness
         df_raw['trip_days'] = pd.to_numeric(df_raw['trip_days'], errors='coerce').fillna(0)
         df_raw['total_earnings'] = clean_currency(df_raw['total_earnings'])
 
-        # 5. Transform Raw Trips into VIN-Specific Summary
-        # We group by VIN first, but keep vehicle_name for the label
+        # 6. Transform into VIN Summary
         summary = df_raw.groupby('vin').agg({
-            'vehicle_name': 'first', # Keeps the name associated with that VIN
+            'vehicle_name': 'first',
             'trip_days': 'sum',
             'total_earnings': 'sum'
         }).reset_index()
 
-        # Filter out VINs with 0 days (canceled or blocked)
-        summary = summary[summary['trip_days'] > 0]
-
-        # Map to app variables
-        summary['display_name'] = summary['vehicle_name'] + " (" + summary['vin'].str[-5:] + ")" # Name + Last 5 of VIN
-        summary['days_booked'] = summary['trip_days']
-        summary['days_available'] = days_in_period
-        summary['daily_rate'] = summary['total_earnings'] / summary['days_booked']
-        summary['market_rate'] = market_avg
+        # Final Calculations
+        summary['display_name'] = summary['vehicle_name'] + " (" + summary['vin'].str[-5:] + ")"
+        summary['utilization'] = (summary['trip_days'] / days_in_period).clip(upper=1.0)
+        summary['daily_rate'] = summary['total_earnings'] / summary['trip_days']
         
-        # 6. Math Engine
-        summary['utilization'] = summary['days_booked'] / summary['days_available']
+        # Revenue Forecasting
         TARGET_UTIL = 0.75
-        summary['potential_monthly_rev'] = (summary['days_available'] * TARGET_UTIL) * summary['market_rate']
+        summary['potential_rev'] = (days_in_period * TARGET_UTIL) * market_avg
         
         total_current = summary['total_earnings'].sum()
-        total_potential = summary['potential_monthly_rev'].sum()
+        total_potential = summary['potential_rev'].sum()
         revenue_gap = total_potential - total_current
 
-        # 7. Display Metrics
+        # 7. Layout - Metrics
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total Earnings", f"${total_current:,.2f}")
-        m2.metric("Target Revenue", f"${total_potential:,.2f}")
-        
-        gap_color = "inverse" if revenue_gap > 0 else "normal"
-        m3.metric("Revenue Gap", f"${revenue_gap:,.2f}", delta=f"{-revenue_gap:,.2f}", delta_color=gap_color)
+        m1.metric("Actual Earnings", f"${total_current:,.2f}")
+        m2.metric(f"Target ({TARGET_UTIL:.0%})", f"${total_potential:,.2f}")
+        m3.metric("Revenue Gap", f"${revenue_gap:,.2f}", delta=f"{-revenue_gap:,.2f}", delta_color="inverse")
 
         st.divider()
 
@@ -77,36 +89,33 @@ if uploaded_file is not None:
         with col_chart:
             fig = px.scatter(
                 summary, x="daily_rate", y="utilization", 
-                size="days_booked", color="display_name",
-                hover_name="vin", # Show the full VIN on hover
-                labels={"daily_rate": "Avg Daily Rate ($)", "utilization": "Utilization (%)"},
-                title="Fleet Performance by VIN",
-                template="plotly_white"
+                size="trip_days", color="display_name",
+                hover_name="vin",
+                labels={"daily_rate": "Daily Rate ($)", "utilization": "Utilization (%)"},
+                title=f"Fleet Performance ({days_in_period} Day Span)",
+                template="plotly_white",
+                range_y=[0, 1.1] # Caps the view at 110% for clarity
             )
             fig.add_hline(y=0.75, line_dash="dot", annotation_text="75% Target")
             st.plotly_chart(fig, use_container_width=True)
 
         with col_list:
-            st.subheader("📋 VIN-Level Insights")
-            summary = summary.sort_values(by='total_earnings', ascending=False)
-            
-            for _, row in summary.iterrows():
-                u = row['utilization']
-                
-                # Using the Last 5 of VIN in the header for quick ID
+            st.subheader("📋 VIN Action Plan")
+            for _, row in summary.sort_values('utilization', ascending=False).iterrows():
                 with st.expander(f"{row['display_name']}"):
-                    st.caption(f"Full VIN: {row['vin']}")
-                    st.write(f"**Utilization:** {u:.0%}")
-                    st.write(f"**Avg Daily:** ${row['daily_rate']:.2f}")
+                    st.write(f"**Util:** {row['utilization']:.1%}")
+                    st.write(f"**Earned:** ${row['total_earnings']:,.2f}")
                     
-                    if u > 0.85:
-                        st.error("Underpriced: High demand.")
-                    elif u < 0.50:
-                        st.warning("Overpriced: Low demand.")
+                    if row['utilization'] > 0.85:
+                        st.error("Action: Raise Daily Price")
+                    elif row['utilization'] < 0.50:
+                        st.warning("Action: Lower Daily Price")
                     else:
-                        st.success("Dialed In: Optimal.")
+                        st.success("Action: Strategy Dialed In")
 
     except Exception as e:
-        st.error(f"Error processing VIN data: {e}")
+        st.error(f"Critical Error: {e}")
+        st.info("Check if your CSV columns match the Turo/Standard format.")
+
 else:
-    st.info("Upload your trip export CSV. The app will now group data by VIN to separate identical vehicles.")
+    st.info("Please upload your trip export CSV to begin. The app will automatically handle date ranges and canceled trips.")
